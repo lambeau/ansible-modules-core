@@ -120,6 +120,12 @@ options:
     default: 'no'
     choices: [ "yes", "no" ]
     version_added: '2.0'
+  connection_limit:
+    description:
+      - if role can log in, this specifies how many concurrent connections the role can make
+    required: false
+    default: null
+    version_added: '2.2'
 notes:
    - The default authentication assumes that you are either logging in as or
      sudo'ing to the postgres account on the host.
@@ -204,7 +210,7 @@ def user_exists(cursor, user):
     return cursor.rowcount > 0
 
 
-def user_add(cursor, user, password, role_attr_flags, encrypted, expires):
+def user_add(cursor, user, password, role_attr_flags, encrypted, expires, connection_limit):
     """Create a new database user (role)."""
     # Note: role_attr_flags escaped by parse_role_attrs and encrypted is a literal
     query_password_data = dict(password=password, expires=expires)
@@ -214,12 +220,14 @@ def user_add(cursor, user, password, role_attr_flags, encrypted, expires):
         query.append("PASSWORD %(password)s")
     if expires is not None:
         query.append("VALID UNTIL %(expires)s")
+    if connection_limit is not None:
+        query.append("CONNECTION_LIMIT %(connection_limit)s")
     query.append(role_attr_flags)
     query = ' '.join(query)
     cursor.execute(query, query_password_data)
     return True
 
-def user_alter(cursor, module, user, password, role_attr_flags, encrypted, expires, no_password_changes):
+def user_alter(cursor, module, user, password, role_attr_flags, encrypted, expires, no_password_changes, connection_limit):
     """Change user password and/or attributes. Return True if changed, False otherwise."""
     changed = False
 
@@ -274,8 +282,9 @@ def user_alter(cursor, module, user, password, role_attr_flags, encrypted, expir
                     role_attr_flags_changing = True
 
         expires_changing = (expires is not None and expires == current_roles_attrs['rol_valid_until'])
+        connection_limit_changing = (connection_limit is not None and connection_limit == current_roles_attrs['rol_conn_limit'])
 
-        if not pwchanging and not role_attr_flags_changing and not expires_changing:
+        if not pwchanging and not role_attr_flags_changing and not expires_changing and not connection_limit_changing:
             return False
 
         alter = ['ALTER USER %(user)s' % {"user": pg_quote_identifier(user, 'role')}]
@@ -287,6 +296,8 @@ def user_alter(cursor, module, user, password, role_attr_flags, encrypted, expir
             alter.append('WITH %s' % role_attr_flags)
         if expires is not None:
             alter.append("VALID UNTIL %(expires)s")
+        if connection_limit is not None:
+            alter.append("CONNECTION_LIMIT %(connection_limit)s")
 
         try:
             cursor.execute(' '.join(alter), query_password_data)
@@ -556,7 +567,8 @@ def main():
             role_attr_flags=dict(default=''),
             encrypted=dict(type='bool', default='no'),
             no_password_changes=dict(type='bool', default='no'),
-            expires=dict(default=None)
+            expires=dict(default=None),
+            connection_limit=dict(default=None)
         ),
         supports_check_mode = True
     )
@@ -581,6 +593,7 @@ def main():
     else:
         encrypted = "UNENCRYPTED"
     expires = module.params["expires"]
+    connection_limit = module.params["connection_limit"]
 
     if not postgresqldb_found:
         module.fail_json(msg="the python psycopg2 module is required")
@@ -617,13 +630,13 @@ def main():
     if state == "present":
         if user_exists(cursor, user):
             try:
-                changed = user_alter(cursor, module, user, password, role_attr_flags, encrypted, expires, no_password_changes)
+                changed = user_alter(cursor, module, user, password, role_attr_flags, encrypted, expires, no_password_changes, connection_limit)
             except SQLParseError:
                 e = get_exception()
                 module.fail_json(msg=str(e))
         else:
             try:
-                changed = user_add(cursor, user, password, role_attr_flags, encrypted, expires)
+                changed = user_add(cursor, user, password, role_attr_flags, encrypted, expires, connection_limit)
             except SQLParseError:
                 e = get_exception()
                 module.fail_json(msg=str(e))
